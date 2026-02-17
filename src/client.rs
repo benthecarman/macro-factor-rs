@@ -235,16 +235,22 @@ impl MacroFactorClient {
                         let parse_str =
                             |k: &str| obj.get(k).and_then(|v| v.as_str()).map(String::from);
 
+                        let serving_grams = parse_num("g");
+                        let user_qty = parse_num("y");
+                        let unit_weight = parse_num("w");
+
                         entries.push(FoodEntry {
                             date,
                             entry_id: key.clone(),
                             name: parse_str("t"),
                             brand: parse_str("b"),
-                            calories: parse_num("c"),
-                            protein: parse_num("p"),
-                            carbs: parse_num("e"),
-                            fat: parse_num("f"),
-                            weight_grams: parse_num("w"),
+                            calories_raw: parse_num("c"),
+                            protein_raw: parse_num("p"),
+                            carbs_raw: parse_num("e"),
+                            fat_raw: parse_num("f"),
+                            serving_grams,
+                            user_qty,
+                            unit_weight,
                             quantity: parse_num("q"),
                             serving_unit: parse_str("s"),
                             hour: parse_str("h"),
