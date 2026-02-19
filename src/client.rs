@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
+use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::FirebaseAuth;
@@ -7,6 +10,9 @@ use crate::firestore::{
     parse_document, parse_firestore_fields, to_firestore_fields, FirestoreClient,
 };
 use crate::models::*;
+
+const TYPESENSE_HOST: &str = "https://oewdzs50x93n2c4mp.a1.typesense.net";
+const TYPESENSE_API_KEY: &str = "4tKoPwBN6YaPXZDeQ7AyDfZbrjPbGMmG";
 
 #[derive(Clone)]
 pub struct MacroFactorClient {
@@ -235,6 +241,8 @@ impl MacroFactorClient {
                         let user_qty = parse_num("y");
                         let unit_weight = parse_num("w");
 
+                        let deleted = obj.get("d").and_then(|v| v.as_bool());
+
                         entries.push(FoodEntry {
                             date,
                             entry_id: key.clone(),
@@ -253,6 +261,7 @@ impl MacroFactorClient {
                             minute: parse_str("mi"),
                             source_type: parse_str("k"),
                             food_id: parse_str("id"),
+                            deleted,
                         });
                     }
                 }
@@ -428,7 +437,7 @@ impl MacroFactorClient {
             "id": food_id,
             "ca": &entry_id,
             "ua": &entry_id,
-            "ef": true,
+            "ef": Value::Null,
             "d": false,
             "x": "13",
             "m": [{"m": "serving", "q": "1.0", "w": "100.0"}]
@@ -471,14 +480,38 @@ impl MacroFactorClient {
 
         let fields = to_firestore_fields(&json!({ &mmdd: entry }));
 
+        let field_mask = format!("`{}`", mmdd);
         self.firestore
-            .patch_document(&path, fields, &[&mmdd])
+            .patch_document(&path, fields, &[&field_mask])
             .await?;
 
         Ok(())
     }
 
-    /// Log a nutrition summary for a given date.
+    /// Delete a weight entry for a given date.
+    ///
+    /// Removes the MMDD field from the `scale/{year}` document.
+    pub async fn delete_weight_entry(&mut self, date: NaiveDate) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let year = date.format("%Y").to_string();
+        let mmdd = date.format("%m%d").to_string();
+        let path = format!("users/{}/scale/{}", uid, year);
+
+        let fields = serde_json::Map::new();
+        let field_mask = format!("`{}`", mmdd);
+        self.firestore
+            .patch_document(&path, fields, &[&field_mask])
+            .await?;
+
+        Ok(())
+    }
+
+    /// Import a manual nutrition summary for a given date.
+    ///
+    /// This writes to the `nutrition/{year}` collection, which is used for
+    /// **externally imported** nutrition data (e.g. Apple Health syncs).
+    /// The app computes daily totals from individual food entries automatically —
+    /// you do NOT need to call this after logging food.
     pub async fn log_nutrition(
         &mut self,
         date: NaiveDate,
@@ -503,10 +536,295 @@ impl MacroFactorClient {
 
         let fields = to_firestore_fields(&json!({ &mmdd: entry }));
 
+        let field_mask = format!("`{}`", mmdd);
         self.firestore
-            .patch_document(&path, fields, &[&mmdd])
+            .patch_document(&path, fields, &[&field_mask])
             .await?;
 
         Ok(())
     }
+
+    /// Search the food database using Typesense.
+    ///
+    /// Searches both `common_foods` and `branded_foods` collections.
+    /// No authentication required — uses the Typesense API key directly.
+    pub async fn search_foods(&self, query: &str) -> Result<Vec<SearchFoodResult>> {
+        let client = Client::new();
+        let url = format!("{}/multi_search", TYPESENSE_HOST);
+
+        let body = json!({
+            "searches": [
+                {
+                    "collection": "common_foods",
+                    "q": query,
+                    "query_by": "foodDesc",
+                    "per_page": 10
+                },
+                {
+                    "collection": "branded_foods",
+                    "q": query,
+                    "query_by": "foodDesc,brandName",
+                    "per_page": 10
+                }
+            ]
+        });
+
+        let resp = client
+            .post(&url)
+            .header("x-typesense-api-key", TYPESENSE_API_KEY)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Typesense search failed: {} - {}", status, text));
+        }
+
+        let data: Value = resp.json().await?;
+        let mut results = Vec::new();
+
+        if let Some(searches) = data.get("results").and_then(|v| v.as_array()) {
+            for (idx, search) in searches.iter().enumerate() {
+                let branded = idx == 1;
+                if let Some(hits) = search.get("hits").and_then(|v| v.as_array()) {
+                    for hit in hits {
+                        if let Some(doc) = hit.get("document") {
+                            if let Some(result) = parse_typesense_hit(doc, branded) {
+                                results.push(result);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Log a food entry from a search result.
+    ///
+    /// `serving` specifies which serving option to use (from `food.servings` or `food.default_serving`).
+    /// `quantity` is how many of that serving (e.g. 1.0 for one serving).
+    pub async fn log_searched_food(
+        &mut self,
+        logged_at: DateTime<Local>,
+        food: &SearchFoodResult,
+        serving: &FoodServing,
+        quantity: f64,
+    ) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let date_str = logged_at.format("%Y-%m-%d").to_string();
+        let path = format!("users/{}/food/{}", uid, date_str);
+
+        let ts = logged_at.timestamp_millis();
+        let entry_id = format!("{}", ts * 1000);
+
+        let hour = logged_at.hour().to_string();
+        let minute = logged_at.minute().to_string();
+
+        // Serving gram weight (this becomes the "g" field — the base for macro values)
+        let serving_grams = serving.gram_weight;
+        // Scale factor from per-100g to per-serving
+        let scale = serving_grams / 100.0;
+
+        // Grams per one display unit
+        let unit_weight = serving.gram_weight / serving.amount;
+        // Total display units
+        let total_units = quantity * serving.amount;
+
+        let measurements: Vec<Value> = food
+            .servings
+            .iter()
+            .map(|s| {
+                json!({
+                    "m": s.description,
+                    "q": format!("{:.1}", s.amount),
+                    "w": format!("{}", s.gram_weight)
+                })
+            })
+            .collect();
+
+        let mut entry = json!({
+            "t": food.name,
+            "b": food.brand.as_deref().unwrap_or(""),
+            "c": format!("{}", food.calories_per_100g * scale),
+            "p": format!("{}", food.protein_per_100g * scale),
+            "e": format!("{}", food.carbs_per_100g * scale),
+            "f": format!("{}", food.fat_per_100g * scale),
+            "g": format!("{}", serving_grams),
+            "w": format!("{}", unit_weight),
+            "y": format!("{}", total_units),
+            "q": format!("{}", serving.amount),
+            "s": serving.description,
+            "u": serving.description,
+            "h": hour,
+            "mi": minute,
+            "k": "t",
+            "id": food.food_id,
+            "ca": &entry_id,
+            "ua": &entry_id,
+            "ef": Value::Null,
+            "d": false,
+            "o": false,
+            "fav": false,
+            "x": food.image_id.as_deref().unwrap_or("13"),
+            "m": measurements
+        });
+
+        // Copy all micronutrient values, scaled to serving size
+        if let Some(obj) = entry.as_object_mut() {
+            for (code, val_per_100g) in &food.nutrients_per_100g {
+                // Skip the main macro codes — already handled above
+                if matches!(code.as_str(), "203" | "204" | "205" | "208") {
+                    continue;
+                }
+                obj.insert(code.clone(), json!(format!("{}", val_per_100g * scale)));
+            }
+        }
+
+        let fields = to_firestore_fields(&json!({ &entry_id: entry }));
+
+        let field_mask = format!("`{}`", entry_id);
+        self.firestore
+            .patch_document(&path, fields, &[&field_mask])
+            .await?;
+
+        Ok(())
+    }
+
+    /// Delete a food entry by marking it as deleted.
+    ///
+    /// Sets the `d` (deleted) field to `true` on the entry.
+    pub async fn delete_food_entry(&mut self, date: NaiveDate, entry_id: &str) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let path = format!("users/{}/food/{}", uid, date_str);
+
+        let fields = to_firestore_fields(&json!({
+            entry_id: { "d": true }
+        }));
+
+        let field_mask = format!("`{}`.d", entry_id);
+        self.firestore
+            .patch_document(&path, fields, &[&field_mask])
+            .await?;
+
+        Ok(())
+    }
+}
+
+/// Parse a Typesense document hit into a SearchFoodResult.
+fn parse_typesense_hit(doc: &Value, branded: bool) -> Option<SearchFoodResult> {
+    let food_id = doc.get("id").and_then(|v| v.as_str())?.to_string();
+    let name = doc.get("foodDesc").and_then(|v| v.as_str())?.to_string();
+
+    let brand = doc
+        .get("brandName")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let nutrient = |code: &str| -> f64 {
+        doc.get(code)
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or(0.0)
+    };
+
+    let calories_per_100g = nutrient("208");
+    let protein_per_100g = nutrient("203");
+    let fat_per_100g = nutrient("204");
+    let carbs_per_100g = nutrient("205");
+
+    let default_serving = doc.get("dfSrv").and_then(|ds| {
+        let desc = ds.get("msreDesc").and_then(|v| v.as_str())?.to_string();
+        let amount = ds.get("amount").and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })?;
+        let gram_weight = ds.get("gmWgt").and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })?;
+        Some(FoodServing {
+            description: desc,
+            amount,
+            gram_weight,
+        })
+    });
+
+    let servings = doc
+        .get("weights")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|w| {
+                    let desc = w.get("msreDesc").and_then(|v| v.as_str())?.to_string();
+                    let amount = w.get("amount").and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })?;
+                    let gram_weight = w.get("gmWgt").and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })?;
+                    Some(FoodServing {
+                        description: desc,
+                        amount,
+                        gram_weight,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let image_id = doc
+        .get("imageId")
+        .and_then(|v| {
+            v.as_str()
+                .map(String::from)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty());
+
+    // Collect all numeric-keyed nutrient values (USDA nutrient codes)
+    let mut nutrients_per_100g = HashMap::new();
+    if let Some(obj) = doc.as_object() {
+        for (key, val) in obj {
+            if key.chars().all(|c| c.is_ascii_digit()) {
+                if let Some(v) = val
+                    .as_f64()
+                    .or_else(|| val.as_str().and_then(|s| s.parse().ok()))
+                {
+                    nutrients_per_100g.insert(key.clone(), v);
+                }
+            }
+        }
+    }
+
+    let source = doc
+        .get("source")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    Some(SearchFoodResult {
+        food_id,
+        name,
+        brand,
+        calories_per_100g,
+        protein_per_100g,
+        fat_per_100g,
+        carbs_per_100g,
+        default_serving,
+        servings,
+        image_id,
+        nutrients_per_100g,
+        source,
+        branded,
+    })
 }

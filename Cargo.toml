@@ -1,6 +1,6 @@
 [package]
 name = "macro-factor-api"
-version = "0.1.1"
+version = "0.3.0"
 edition = "2021"
 description = "Unofficial Rust client for reading MacroFactor data"
 license = "MIT"
@@ -13,3 +13,6 @@ reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+dotenvy = "0.15"

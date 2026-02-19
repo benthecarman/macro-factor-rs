@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +33,48 @@ pub struct NutritionSummary {
     pub fiber: Option<f64>,
     /// Source
     pub source: Option<String>,
+}
+
+/// A serving option for a food item (from Typesense search results).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoodServing {
+    /// Serving description (e.g. "oz", "cup", "bar")
+    pub description: String,
+    /// Amount in display units (e.g. 3.0)
+    pub amount: f64,
+    /// Weight in grams for this serving (e.g. 85.0)
+    pub gram_weight: f64,
+}
+
+/// A food search result from Typesense.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchFoodResult {
+    /// Food ID (e.g. "uc_5749" or "m_19306281")
+    pub food_id: String,
+    /// Food description/name
+    pub name: String,
+    /// Brand name (None if generic/common food)
+    pub brand: Option<String>,
+    /// Calories per 100g
+    pub calories_per_100g: f64,
+    /// Protein per 100g
+    pub protein_per_100g: f64,
+    /// Fat per 100g
+    pub fat_per_100g: f64,
+    /// Carbs per 100g
+    pub carbs_per_100g: f64,
+    /// Default serving option
+    pub default_serving: Option<FoodServing>,
+    /// All available serving options
+    pub servings: Vec<FoodServing>,
+    /// Image ID for the bundled SVG icon (maps to assets/foods/i{id}.svg in the app)
+    pub image_id: Option<String>,
+    /// All nutrient values per 100g, keyed by USDA nutrient code (e.g. "269"=sugar, "291"=fiber)
+    pub nutrients_per_100g: HashMap<String, f64>,
+    /// Data source (e.g. "USDAC", "MND")
+    pub source: Option<String>,
+    /// Whether this is a branded food (vs common)
+    pub branded: bool,
 }
 
 /// An individual food log entry.
@@ -73,6 +117,8 @@ pub struct FoodEntry {
     pub source_type: Option<String>,
     /// Food ID
     pub food_id: Option<String>,
+    /// Whether this entry has been deleted
+    pub deleted: Option<bool>,
 }
 
 impl FoodEntry {
