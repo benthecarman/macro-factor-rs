@@ -448,8 +448,10 @@ impl MacroFactorClient {
 
         let fields = to_firestore_fields(&json!({ &entry_id: entry }));
 
+        // Firestore rejects field paths that start with a digit unless backtick-quoted
+        let field_mask = format!("`{}`", entry_id);
         self.firestore
-            .patch_document(&path, fields, &[&entry_id])
+            .patch_document(&path, fields, &[&field_mask])
             .await?;
 
         Ok(())
