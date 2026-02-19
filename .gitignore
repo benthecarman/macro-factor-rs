@@ -5,4 +5,5 @@ mitm.log
 captured_flows
 captured_token_flows
 .env
+.claude/
 
