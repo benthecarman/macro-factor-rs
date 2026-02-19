@@ -3,6 +3,8 @@ name = "macro-factor-api"
 version = "0.1.0"
 edition = "2021"
 description = "Unofficial Rust client for reading MacroFactor data"
+license = "MIT"
+repository = "https://github.com/benthecarman/macro-factor-api"
 
 [dependencies]
 anyhow = "1"
