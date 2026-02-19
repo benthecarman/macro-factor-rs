@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::{NaiveDate, Timelike, Utc};
+use chrono::{Local, NaiveDate, Timelike, Utc};
 use serde_json::{json, Value};
 
 use crate::auth::FirebaseAuth;
@@ -418,8 +418,10 @@ impl MacroFactorClient {
             now.timestamp_millis() * 1000 + (now.timestamp_subsec_micros() as i64 % 1000) + 10
         );
 
-        let hour = now.hour().to_string();
-        let minute = now.minute().to_string();
+        // Use local time for display fields so the log shows the correct meal time
+        let local_now = now.with_timezone(&Local);
+        let hour = local_now.hour().to_string();
+        let minute = local_now.minute().to_string();
 
         let entry = json!({
             "t": name,
