@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::{Local, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
 use serde_json::{json, Value};
 
 use crate::auth::FirebaseAuth;
@@ -391,13 +391,17 @@ impl MacroFactorClient {
         })
     }
 
-    /// Log a food entry for a given date.
+    /// Log a food entry for a given date and time.
+    ///
+    /// Pass `logged_at` as the local datetime when the food was consumed —
+    /// the caller is responsible for providing the correct timezone.
+    /// Use `chrono::Local::now()` for the current time.
     ///
     /// Fields like `calories`, `protein`, `carbs`, `fat` are required.
     /// The entry will be created with a timestamp-based ID.
     pub async fn log_food(
         &mut self,
-        date: NaiveDate,
+        logged_at: DateTime<Local>,
         name: &str,
         calories: f64,
         protein: f64,
@@ -405,23 +409,15 @@ impl MacroFactorClient {
         fat: f64,
     ) -> Result<()> {
         let uid = self.get_user_id().await?;
-        let date_str = date.format("%Y-%m-%d").to_string();
+        let date_str = logged_at.format("%Y-%m-%d").to_string();
         let path = format!("users/{}/food/{}", uid, date_str);
 
-        let now = Utc::now();
-        let entry_id = format!(
-            "{}",
-            now.timestamp_millis() * 1000 + now.timestamp_subsec_micros() as i64 % 1000
-        );
-        let food_id = format!(
-            "{}",
-            now.timestamp_millis() * 1000 + (now.timestamp_subsec_micros() as i64 % 1000) + 10
-        );
+        let ts = logged_at.timestamp_millis();
+        let entry_id = format!("{}", ts * 1000);
+        let food_id = format!("{}", ts * 1000 + 10);
 
-        // Use local time for display fields so the log shows the correct meal time
-        let local_now = now.with_timezone(&Local);
-        let hour = local_now.hour().to_string();
-        let minute = local_now.minute().to_string();
+        let hour = logged_at.hour().to_string();
+        let minute = logged_at.minute().to_string();
 
         let entry = json!({
             "t": name,
