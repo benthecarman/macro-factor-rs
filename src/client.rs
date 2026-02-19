@@ -390,14 +390,29 @@ impl MacroFactorClient {
         })
     }
 
-    /// Log a food entry for a given date and time.
+    /// Write a food entry to Firestore.
     ///
-    /// Pass `logged_at` as the local datetime when the food was consumed —
-    /// the caller is responsible for providing the correct timezone.
-    /// Use `chrono::Local::now()` for the current time.
+    /// This is the shared implementation used by `log_food` and `log_searched_food`.
+    async fn write_food_entry(&mut self, logged_at: DateTime<Local>, entry: Value) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let date_str = logged_at.format("%Y-%m-%d").to_string();
+        let path = format!("users/{}/food/{}", uid, date_str);
+
+        let ts = logged_at.timestamp_millis();
+        let entry_id = format!("{}", ts * 1000);
+
+        let fields = to_firestore_fields(&json!({ &entry_id: entry }));
+        let field_mask = format!("`{}`", entry_id);
+        self.firestore
+            .patch_document(&path, fields, &[&field_mask])
+            .await?;
+
+        Ok(())
+    }
+
+    /// Log a food entry for a given date and time (quick add).
     ///
-    /// Fields like `calories`, `protein`, `carbs`, `fat` are required.
-    /// The entry will be created with a timestamp-based ID.
+    /// After logging, call [`sync_day`](Self::sync_day) to update the app's daily summary.
     pub async fn log_food(
         &mut self,
         logged_at: DateTime<Local>,
@@ -407,14 +422,10 @@ impl MacroFactorClient {
         carbs: f64,
         fat: f64,
     ) -> Result<()> {
-        let uid = self.get_user_id().await?;
-        let date_str = logged_at.format("%Y-%m-%d").to_string();
-        let path = format!("users/{}/food/{}", uid, date_str);
-
         let ts = logged_at.timestamp_millis();
-        let entry_id = format!("{}", ts * 1000);
         let food_id = format!("{}", ts * 1000 + 10);
-
+        let entry_id = format!("{}", ts * 1000);
+        let ua_id = format!("{}", ts * 1000 + 1);
         let hour = logged_at.hour().to_string();
         let minute = logged_at.minute().to_string();
 
@@ -436,22 +447,14 @@ impl MacroFactorClient {
             "k": "n",
             "id": food_id,
             "ca": &entry_id,
-            "ua": &entry_id,
-            "ef": Value::Null,
+            "ua": &ua_id,
+            "ef": false,
             "d": false,
             "x": "13",
             "m": [{"m": "serving", "q": "1.0", "w": "100.0"}]
         });
 
-        let fields = to_firestore_fields(&json!({ &entry_id: entry }));
-
-        // Firestore rejects field paths that start with a digit unless backtick-quoted
-        let field_mask = format!("`{}`", entry_id);
-        self.firestore
-            .patch_document(&path, fields, &[&field_mask])
-            .await?;
-
-        Ok(())
+        self.write_food_entry(logged_at, entry).await
     }
 
     /// Log a weight entry for a given date.
@@ -607,6 +610,8 @@ impl MacroFactorClient {
     ///
     /// `serving` specifies which serving option to use (from `food.servings` or `food.default_serving`).
     /// `quantity` is how many of that serving (e.g. 1.0 for one serving).
+    ///
+    /// After logging, call [`sync_day`](Self::sync_day) to update the app's daily summary.
     pub async fn log_searched_food(
         &mut self,
         logged_at: DateTime<Local>,
@@ -614,13 +619,9 @@ impl MacroFactorClient {
         serving: &FoodServing,
         quantity: f64,
     ) -> Result<()> {
-        let uid = self.get_user_id().await?;
-        let date_str = logged_at.format("%Y-%m-%d").to_string();
-        let path = format!("users/{}/food/{}", uid, date_str);
-
         let ts = logged_at.timestamp_millis();
         let entry_id = format!("{}", ts * 1000);
-
+        let ua_id = format!("{}", ts * 1000 + 1);
         let hour = logged_at.hour().to_string();
         let minute = logged_at.minute().to_string();
 
@@ -664,8 +665,8 @@ impl MacroFactorClient {
             "k": "t",
             "id": food.food_id,
             "ca": &entry_id,
-            "ua": &entry_id,
-            "ef": Value::Null,
+            "ua": &ua_id,
+            "ef": false,
             "d": false,
             "o": false,
             "fav": false,
@@ -684,8 +685,19 @@ impl MacroFactorClient {
             }
         }
 
-        let fields = to_firestore_fields(&json!({ &entry_id: entry }));
+        self.write_food_entry(logged_at, entry).await
+    }
 
+    /// Delete a food entry by removing it from the document.
+    ///
+    /// After deleting, call [`sync_day`](Self::sync_day) to update the app's daily summary.
+    pub async fn delete_food_entry(&mut self, date: NaiveDate, entry_id: &str) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let path = format!("users/{}/food/{}", uid, date_str);
+
+        // Hard delete: include field in mask but not in body → Firestore removes it
+        let fields = serde_json::Map::new();
         let field_mask = format!("`{}`", entry_id);
         self.firestore
             .patch_document(&path, fields, &[&field_mask])
@@ -694,24 +706,116 @@ impl MacroFactorClient {
         Ok(())
     }
 
-    /// Delete a food entry by marking it as deleted.
+    /// Sync the daily micro-nutrition summary for a given date.
     ///
-    /// Sets the `d` (deleted) field to `true` on the entry.
-    pub async fn delete_food_entry(&mut self, date: NaiveDate, entry_id: &str) -> Result<()> {
+    /// Reads all food entries, filters out deleted ones, sums macros and
+    /// micronutrients, and writes the totals to `micro/{year}`. The app's
+    /// daily summary reads from this collection.
+    pub async fn sync_day(&mut self, date: NaiveDate) -> Result<()> {
         let uid = self.get_user_id().await?;
+        let entries = self.get_food_log(date).await?;
+
+        let mut total_k = 0.0;
+        let mut total_p = 0.0;
+        let mut total_c = 0.0;
+        let mut total_f = 0.0;
+        let mut micros: HashMap<String, f64> = HashMap::new();
+
+        for entry in &entries {
+            if entry.deleted == Some(true) {
+                continue;
+            }
+            total_k += entry.calories().unwrap_or(0.0);
+            total_p += entry.protein().unwrap_or(0.0);
+            total_c += entry.carbs().unwrap_or(0.0);
+            total_f += entry.fat().unwrap_or(0.0);
+        }
+
+        // Re-read raw document to get micronutrient fields
         let date_str = date.format("%Y-%m-%d").to_string();
-        let path = format!("users/{}/food/{}", uid, date_str);
+        let food_path = format!("users/{}/food/{}", uid, date_str);
+        if let Ok(raw) = self.get_raw_document(&food_path).await {
+            if let Some(map) = raw.as_object() {
+                for (key, val) in map {
+                    if key.starts_with('_') {
+                        continue;
+                    }
+                    if let Some(obj) = val.as_object() {
+                        // Skip deleted entries
+                        if obj.get("d").and_then(|v| v.as_bool()) == Some(true) {
+                            continue;
+                        }
+                        let multiplier = Self::compute_multiplier(obj);
+                        for (field, fval) in obj {
+                            if !field.chars().all(|c| c.is_ascii_digit()) {
+                                continue;
+                            }
+                            // Skip main macro codes already handled
+                            if matches!(field.as_str(), "208" | "203" | "204" | "205") {
+                                continue;
+                            }
+                            if let Some(v) = fval
+                                .as_f64()
+                                .or_else(|| fval.as_str().and_then(|s| s.parse().ok()))
+                            {
+                                let scaled = v * multiplier;
+                                *micros.entry(field.clone()).or_default() += scaled;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-        let fields = to_firestore_fields(&json!({
-            entry_id: { "d": true }
-        }));
+        // All micro nutrient codes the app expects
+        let all_codes = [
+            "209", "221", "255", "262", "269", "291", "301", "303", "304", "305", "306", "307",
+            "309", "312", "315", "317", "320", "323", "328", "401", "404", "405", "406", "410",
+            "415", "417", "418", "421", "430", "501", "502", "503", "504", "505", "506", "507",
+            "508", "509", "510", "512", "539", "601", "606", "621", "629", "645", "646", "693",
+            "851", "901", "902",
+        ];
 
-        let field_mask = format!("`{}`.d", entry_id);
+        let mut entry = serde_json::Map::new();
+        entry.insert("k".to_string(), json!(format!("{}", total_k)));
+        entry.insert("p".to_string(), json!(format!("{}", total_p)));
+        entry.insert("c".to_string(), json!(format!("{}", total_c)));
+        entry.insert("f".to_string(), json!(format!("{}", total_f)));
+
+        for code in &all_codes {
+            let code_str = code.to_string();
+            if let Some(v) = micros.get(&code_str) {
+                entry.insert(code_str, json!(format!("{}", v)));
+            } else {
+                entry.insert(code_str, Value::Null);
+            }
+        }
+
+        let year = date.format("%Y").to_string();
+        let mmdd = date.format("%m%d").to_string();
+        let path = format!("users/{}/micro/{}", uid, year);
+
+        let fields = to_firestore_fields(&json!({ &mmdd: Value::Object(entry) }));
+        let field_mask = format!("`{}`", mmdd);
         self.firestore
             .patch_document(&path, fields, &[&field_mask])
             .await?;
 
         Ok(())
+    }
+
+    /// Compute the multiplier for a raw food entry object.
+    fn compute_multiplier(obj: &serde_json::Map<String, Value>) -> f64 {
+        let parse = |k: &str| -> Option<f64> {
+            obj.get(k).and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+        };
+        match (parse("g"), parse("y"), parse("w")) {
+            (Some(g), Some(y), Some(w)) if g > 0.0 => (y * w) / g,
+            _ => 1.0,
+        }
     }
 }
 

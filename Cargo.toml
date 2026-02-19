@@ -1,6 +1,6 @@
 [package]
 name = "macro-factor-api"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Unofficial Rust client for reading MacroFactor data"
 license = "MIT"

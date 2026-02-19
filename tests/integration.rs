@@ -103,8 +103,10 @@ async fn log_and_delete_searched_food() {
     let entry_id = entry.entry_id.clone();
     client.delete_food_entry(today, &entry_id).await.unwrap();
 
-    // Verify deleted
+    // Verify deleted (hard delete — entry should be gone)
     let entries = client.get_food_log(today).await.unwrap();
-    let deleted = entries.iter().find(|e| e.entry_id == entry_id).unwrap();
-    assert_eq!(deleted.deleted, Some(true));
+    assert!(
+        entries.iter().all(|e| e.entry_id != entry_id),
+        "entry should be removed after delete"
+    );
 }
