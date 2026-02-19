@@ -1,11 +1,10 @@
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Local, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Local, NaiveDate, Timelike};
 use serde_json::{json, Value};
 
 use crate::auth::FirebaseAuth;
 use crate::firestore::{
-    parse_document, parse_firestore_fields, to_firestore_fields,
-    FirestoreClient,
+    parse_document, parse_firestore_fields, to_firestore_fields, FirestoreClient,
 };
 use crate::models::*;
 
@@ -50,7 +49,10 @@ impl MacroFactorClient {
     /// Get the user profile document.
     pub async fn get_profile(&mut self) -> Result<Value> {
         let uid = self.get_user_id().await?;
-        let doc = self.firestore.get_document(&format!("users/{}", uid)).await?;
+        let doc = self
+            .firestore
+            .get_document(&format!("users/{}", uid))
+            .await?;
         Ok(parse_document(&doc))
     }
 
@@ -62,11 +64,7 @@ impl MacroFactorClient {
     }
 
     /// Get a few documents from a collection for schema discovery.
-    pub async fn sample_collection(
-        &self,
-        collection_path: &str,
-        limit: u32,
-    ) -> Result<Vec<Value>> {
+    pub async fn sample_collection(&self, collection_path: &str, limit: u32) -> Result<Vec<Value>> {
         let (docs, _) = self
             .firestore
             .list_documents(collection_path, Some(limit), None)
@@ -114,15 +112,11 @@ impl MacroFactorClient {
                         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
                             if date >= start && date <= end {
                                 if let Some(obj) = val.as_object() {
-                                    let weight = obj
-                                        .get("w")
-                                        .and_then(|v| v.as_f64())
-                                        .unwrap_or(0.0);
+                                    let weight =
+                                        obj.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                     let body_fat = obj.get("f").and_then(|v| v.as_f64());
-                                    let source = obj
-                                        .get("s")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
+                                    let source =
+                                        obj.get("s").and_then(|v| v.as_str()).map(String::from);
 
                                     entries.push(ScaleEntry {
                                         date,
@@ -176,9 +170,8 @@ impl MacroFactorClient {
                                 if let Some(obj) = val.as_object() {
                                     let parse_num = |k: &str| -> Option<f64> {
                                         obj.get(k).and_then(|v| {
-                                            v.as_f64().or_else(|| {
-                                                v.as_str().and_then(|s| s.parse().ok())
-                                            })
+                                            v.as_f64()
+                                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
                                         })
                                     };
 
@@ -292,11 +285,7 @@ impl MacroFactorClient {
 
     /// Get step counts for a date range.
     /// Data is stored in `steps/{year}` docs with MMDD keys.
-    pub async fn get_steps(
-        &mut self,
-        start: NaiveDate,
-        end: NaiveDate,
-    ) -> Result<Vec<StepEntry>> {
+    pub async fn get_steps(&mut self, start: NaiveDate, end: NaiveDate) -> Result<Vec<StepEntry>> {
         let uid = self.get_user_id().await?;
         let mut entries = Vec::new();
 
@@ -325,15 +314,12 @@ impl MacroFactorClient {
                                     let steps = obj
                                         .get("st")
                                         .and_then(|v| {
-                                            v.as_u64().or_else(|| {
-                                                v.as_str().and_then(|s| s.parse().ok())
-                                            })
+                                            v.as_u64()
+                                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
                                         })
                                         .unwrap_or(0);
-                                    let source = obj
-                                        .get("s")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
+                                    let source =
+                                        obj.get("s").and_then(|v| v.as_str()).map(String::from);
 
                                     entries.push(StepEntry {
                                         date,
@@ -366,7 +352,10 @@ impl MacroFactorClient {
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                        .filter_map(|v| {
+                            v.as_f64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -377,9 +366,10 @@ impl MacroFactorClient {
             protein: parse_vec("protein"),
             carbs: parse_vec("carbs"),
             fat: parse_vec("fat"),
-            tdee: planner
-                .get("tdeeValue")
-                .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))),
+            tdee: planner.get("tdeeValue").and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            }),
             program_style: planner
                 .get("programStyle")
                 .and_then(|v| v.as_str())

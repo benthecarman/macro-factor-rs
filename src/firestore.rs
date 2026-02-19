@@ -65,12 +65,7 @@ impl FirestoreClient {
         let token = self.auth.get_id_token().await?;
         let url = format!("{}/{}", self.documents_base(), path);
 
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await?;
+        let resp = self.client.get(&url).bearer_auth(&token).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -119,10 +114,7 @@ impl FirestoreClient {
         ))
     }
 
-    pub async fn list_collection_ids(
-        &self,
-        parent_path: Option<&str>,
-    ) -> Result<Vec<String>> {
+    pub async fn list_collection_ids(&self, parent_path: Option<&str>) -> Result<Vec<String>> {
         let token = self.auth.get_id_token().await?;
         let parent = match parent_path {
             Some(p) => format!("{}/{}", self.documents_base(), p),
@@ -150,11 +142,7 @@ impl FirestoreClient {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!(
-                    "listCollectionIds failed: {} - {}",
-                    status,
-                    body
-                ));
+                return Err(anyhow!("listCollectionIds failed: {} - {}", status, body));
             }
 
             let list_resp: ListCollectionIdsResponse = resp.json().await?;
@@ -216,10 +204,7 @@ impl FirestoreClient {
         let token = self.auth.get_id_token().await?;
         let url = format!("{}/{}", self.documents_base(), path);
 
-        let mut req = self
-            .client
-            .patch(&url)
-            .bearer_auth(&token);
+        let mut req = self.client.patch(&url).bearer_auth(&token);
 
         for fp in field_paths {
             req = req.query(&[("updateMask.fieldPaths", *fp)]);
@@ -301,7 +286,7 @@ pub fn parse_firestore_value(val: &Value) -> Value {
     if let Some(b) = val.get("booleanValue") {
         return b.clone();
     }
-    if let Some(_) = val.get("nullValue") {
+    if val.get("nullValue").is_some() {
         return Value::Null;
     }
     if let Some(ts) = val.get("timestampValue") {

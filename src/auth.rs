@@ -128,19 +128,12 @@ impl FirebaseAuth {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Failed to refresh token: {} - {}",
-                status,
-                body
-            ));
+            return Err(anyhow!("Failed to refresh token: {} - {}", status, body));
         }
 
         let token_resp: RefreshTokenResponse = resp.json().await?;
 
-        let expires_in: i64 = token_resp
-            .expires_in
-            .parse()
-            .unwrap_or(3600);
+        let expires_in: i64 = token_resp.expires_in.parse().unwrap_or(3600);
         let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
 
         // Update refresh token if it changed
