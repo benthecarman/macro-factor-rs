@@ -204,6 +204,81 @@ impl FirestoreClient {
         let results: Vec<RunQueryResponse> = resp.json().await?;
         Ok(results.into_iter().filter_map(|r| r.document).collect())
     }
+
+    /// Update (PATCH) specific fields in a document.
+    /// Creates the document if it doesn't exist.
+    pub async fn patch_document(
+        &self,
+        path: &str,
+        fields: Map<String, Value>,
+        field_paths: &[&str],
+    ) -> Result<Document> {
+        let token = self.auth.get_id_token().await?;
+        let url = format!("{}/{}", self.documents_base(), path);
+
+        let mut req = self
+            .client
+            .patch(&url)
+            .bearer_auth(&token);
+
+        for fp in field_paths {
+            req = req.query(&[("updateMask.fieldPaths", *fp)]);
+        }
+
+        let body = json!({
+            "fields": fields
+        });
+
+        let resp: reqwest::Response = req.json(&body).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("PATCH {} failed: {} - {}", path, status, text));
+        }
+
+        Ok(resp.json().await?)
+    }
+}
+
+/// Convert a serde_json::Value into Firestore's typed value format.
+pub fn to_firestore_value(val: &Value) -> Value {
+    match val {
+        Value::Null => json!({"nullValue": null}),
+        Value::Bool(b) => json!({"booleanValue": b}),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                json!({"integerValue": i.to_string()})
+            } else if let Some(f) = n.as_f64() {
+                json!({"doubleValue": f})
+            } else {
+                json!({"integerValue": n.to_string()})
+            }
+        }
+        Value::String(s) => json!({"stringValue": s}),
+        Value::Array(arr) => {
+            let values: Vec<Value> = arr.iter().map(to_firestore_value).collect();
+            json!({"arrayValue": {"values": values}})
+        }
+        Value::Object(map) => {
+            let mut fields = Map::new();
+            for (k, v) in map {
+                fields.insert(k.clone(), to_firestore_value(v));
+            }
+            json!({"mapValue": {"fields": fields}})
+        }
+    }
+}
+
+/// Convert a flat JSON object into Firestore fields format.
+pub fn to_firestore_fields(obj: &Value) -> Map<String, Value> {
+    let mut fields = Map::new();
+    if let Some(map) = obj.as_object() {
+        for (k, v) in map {
+            fields.insert(k.clone(), to_firestore_value(v));
+        }
+    }
+    fields
 }
 
 /// Parse a Firestore typed value into a serde_json::Value.

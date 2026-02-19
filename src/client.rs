@@ -1,9 +1,12 @@
-use anyhow::Result;
-use chrono::NaiveDate;
-use serde_json::Value;
+use anyhow::{anyhow, Result};
+use chrono::{NaiveDate, Timelike, Utc};
+use serde_json::{json, Value};
 
 use crate::auth::FirebaseAuth;
-use crate::firestore::{parse_document, parse_firestore_fields, FirestoreClient};
+use crate::firestore::{
+    parse_document, parse_firestore_fields, to_firestore_fields,
+    FirestoreClient,
+};
 use crate::models::*;
 
 #[derive(Clone)]
@@ -347,5 +350,173 @@ impl MacroFactorClient {
 
         entries.sort_by_key(|e| e.date);
         Ok(entries)
+    }
+
+    /// Get the current macro/calorie goals from the user's planner.
+    pub async fn get_goals(&mut self) -> Result<Goals> {
+        let profile = self.get_profile().await?;
+
+        let planner = profile
+            .get("planner")
+            .ok_or_else(|| anyhow!("No planner field in user profile"))?;
+
+        let parse_vec = |key: &str| -> Vec<f64> {
+            planner
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok(Goals {
+            calories: parse_vec("calories"),
+            protein: parse_vec("protein"),
+            carbs: parse_vec("carbs"),
+            fat: parse_vec("fat"),
+            tdee: planner
+                .get("tdeeValue")
+                .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))),
+            program_style: planner
+                .get("programStyle")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            program_type: planner
+                .get("programType")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        })
+    }
+
+    /// Log a food entry for a given date.
+    ///
+    /// Fields like `calories`, `protein`, `carbs`, `fat` are required.
+    /// The entry will be created with a timestamp-based ID.
+    pub async fn log_food(
+        &mut self,
+        date: NaiveDate,
+        name: &str,
+        calories: f64,
+        protein: f64,
+        carbs: f64,
+        fat: f64,
+    ) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let date_str = date.format("%Y-%m-%d").to_string();
+        let path = format!("users/{}/food/{}", uid, date_str);
+
+        let now = Utc::now();
+        let entry_id = format!(
+            "{}",
+            now.timestamp_millis() * 1000 + now.timestamp_subsec_micros() as i64 % 1000
+        );
+        let food_id = format!(
+            "{}",
+            now.timestamp_millis() * 1000 + (now.timestamp_subsec_micros() as i64 % 1000) + 10
+        );
+
+        let hour = now.hour().to_string();
+        let minute = now.minute().to_string();
+
+        let entry = json!({
+            "t": name,
+            "b": "Quick Add",
+            "c": format!("{:.1}", calories),
+            "p": format!("{:.1}", protein),
+            "e": format!("{:.1}", carbs),
+            "f": format!("{:.1}", fat),
+            "w": "100.0",
+            "g": "100.0",
+            "q": "1.0",
+            "y": "1.0",
+            "s": "serving",
+            "u": "serving",
+            "h": hour,
+            "mi": minute,
+            "k": "n",
+            "id": food_id,
+            "ca": &entry_id,
+            "ua": &entry_id,
+            "ef": true,
+            "d": false,
+            "x": "13",
+            "m": [{"m": "serving", "q": "1.0", "w": "100.0"}]
+        });
+
+        let fields = to_firestore_fields(&json!({ &entry_id: entry }));
+
+        self.firestore
+            .patch_document(&path, fields, &[&entry_id])
+            .await?;
+
+        Ok(())
+    }
+
+    /// Log a weight entry for a given date.
+    /// Weight should be in kg.
+    pub async fn log_weight(
+        &mut self,
+        date: NaiveDate,
+        weight_kg: f64,
+        body_fat: Option<f64>,
+    ) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let year = date.format("%Y").to_string();
+        let mmdd = date.format("%m%d").to_string();
+        let path = format!("users/{}/scale/{}", uid, year);
+
+        let mut entry = json!({
+            "w": weight_kg,
+            "s": "m",
+            "do": null
+        });
+        if let Some(bf) = body_fat {
+            entry["f"] = json!(bf);
+        } else {
+            entry["f"] = Value::Null;
+        }
+
+        let fields = to_firestore_fields(&json!({ &mmdd: entry }));
+
+        self.firestore
+            .patch_document(&path, fields, &[&mmdd])
+            .await?;
+
+        Ok(())
+    }
+
+    /// Log a nutrition summary for a given date.
+    pub async fn log_nutrition(
+        &mut self,
+        date: NaiveDate,
+        calories: f64,
+        protein: Option<f64>,
+        carbs: Option<f64>,
+        fat: Option<f64>,
+    ) -> Result<()> {
+        let uid = self.get_user_id().await?;
+        let year = date.format("%Y").to_string();
+        let mmdd = date.format("%m%d").to_string();
+        let path = format!("users/{}/nutrition/{}", uid, year);
+
+        let entry = json!({
+            "k": format!("{:.0}", calories),
+            "p": protein.map(|v| format!("{:.0}", v)).unwrap_or_default(),
+            "c": carbs.map(|v| format!("{:.0}", v)).unwrap_or_default(),
+            "f": fat.map(|v| format!("{:.0}", v)).unwrap_or_default(),
+            "s": "m",
+            "do": null
+        });
+
+        let fields = to_firestore_fields(&json!({ &mmdd: entry }));
+
+        self.firestore
+            .patch_document(&path, fields, &[&mmdd])
+            .await?;
+
+        Ok(())
     }
 }

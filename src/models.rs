@@ -135,6 +135,25 @@ pub struct StepEntry {
     pub source: Option<String>,
 }
 
+/// Daily macro/calorie goals from the planner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Goals {
+    /// Daily calorie targets per day of week (Mon=0..Sun=6)
+    pub calories: Vec<f64>,
+    /// Daily protein targets (g) per day of week
+    pub protein: Vec<f64>,
+    /// Daily carbs targets (g) per day of week
+    pub carbs: Vec<f64>,
+    /// Daily fat targets (g) per day of week
+    pub fat: Vec<f64>,
+    /// Current TDEE estimate
+    pub tdee: Option<f64>,
+    /// Program style (e.g. "coached")
+    pub program_style: Option<String>,
+    /// Program type (e.g. "performance")
+    pub program_type: Option<String>,
+}
+
 /// User profile from the top-level user document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfile {

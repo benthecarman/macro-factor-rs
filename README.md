@@ -58,10 +58,14 @@ async fn main() -> anyhow::Result<()> {
 | `login(email, password)` | Sign in with email/password |
 | `new(refresh_token)` | Create client with a refresh token |
 | `get_profile()` | User profile (name, height, weight units, goals, etc.) |
+| `get_goals()` | Current calorie/macro targets and TDEE |
 | `get_weight_entries(start, end)` | Scale entries with weight in kg |
 | `get_nutrition(start, end)` | Daily summaries (calories, protein, carbs, fat, sugar, fiber) |
 | `get_food_log(date)` | Individual food entries for a day |
 | `get_steps(start, end)` | Daily step counts |
+| `log_food(date, name, cal, protein, carbs, fat)` | Log a food entry |
+| `log_weight(date, weight_kg, body_fat)` | Log a weight entry |
+| `log_nutrition(date, cal, protein, carbs, fat)` | Log a nutrition summary |
 | `get_raw_document(path)` | Fetch any Firestore document by path |
 
 ## Firestore Schema
